@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>Haberdashery Players</title>
+<!--
+  THE PLAYER DASHBOARD'S SIGN-IN PAGE (ENGINEERING.md "Player dashboard").
+  This is the only public file: it is copied by hand to the game's site as
+  players/index.html and changes rarely. It holds no numbers and no dashboard code.
+  Jay signs in with his Axon cockpit login (Supabase Auth, Axon's project); with that
+  session it downloads app.html (the dashboard page) and doc.json.gz (the numbers)
+  from the private Storage bucket, whose only read rule is Jay's own account, and
+  opens the page. publish.py refreshes both files every hour.
+  The key below is Supabase's publishable key: public by design, it reads nothing
+  on its own.
+-->
+<style>
+:root{--bg:#f5f6fa;--surface:#fff;--rule:#dfe2ec;--ink:#2b2d50;--ink-2:#55587a;--err:#b5401a;--focus:#2a78d6;
+  --display:"Figtree",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#12131f;--surface:#1b1d2c;--rule:#2f3247;--ink:#eef0fa;--ink-2:#b4b7cf;--err:#f08a5d;--focus:#3987e5;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#12131f;--surface:#1b1d2c;--rule:#2f3247;--ink:#eef0fa;--ink-2:#b4b7cf;--err:#f08a5d;--focus:#3987e5;color-scheme:dark}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--display);font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased}
+main{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px max(16px,env(safe-area-inset-left,0px))}
+form{background:var(--surface);border:1px solid var(--rule);border-radius:16px;padding:24px;width:min(380px,100%);display:flex;flex-direction:column;gap:12px}
+h1{font-size:19px;margin:0}
+p{margin:0;color:var(--ink-2);font-size:13px}
+input[type=email],input[type=password]{font:inherit;font-size:16px;padding:10px 12px;border:1px solid var(--rule);border-radius:10px;background:var(--bg);color:var(--ink);width:100%}
+label{font-size:13px;color:var(--ink-2);display:flex;gap:6px;align-items:center}
+button{font:inherit;font-weight:600;padding:10px 12px;border:0;border-radius:10px;background:var(--ink);color:var(--bg);cursor:pointer}
+button:disabled{opacity:.6;cursor:default}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.msg{font-size:13px;min-height:1.2em;color:var(--ink-2)}
+.msg.err{color:var(--err)}
+</style>
+</head>
+<body>
+<main>
+  <form id="f" hidden>
+    <h1>Little Haberdashery · Players</h1>
+    <p>Sign in with your Axon cockpit email and password. Only Jay's account can open the numbers.</p>
+    <input type="email" id="email" autocomplete="username" placeholder="Email" required>
+    <input type="password" id="pw" autocomplete="current-password" placeholder="Password" required>
+    <label><input type="checkbox" id="remember" checked> Stay signed in on this device</label>
+    <button type="submit" id="go">Sign in</button>
+    <div class="msg" id="msg" role="alert"></div>
+  </form>
+  <div class="msg" id="wait">Opening…</div>
+</main>
+<script>
+(() => {
+'use strict';
+const SB = 'https://qnpnvdainbakygnnktrn.supabase.co';
+const KEY = 'sb_publishable_cYj5fAg_lDRIaDJxQrP4Mw_ISjPq_k-';
+const BUCKET = 'haberdashery-dashboard';
+const RT = 'hab-dash-rt';
+const $ = s => document.querySelector(s);
+
+function stored() { try { return localStorage.getItem(RT) || sessionStorage.getItem(RT); } catch (e) { return null; } }
+function keep(rt, remember) {
+  try { localStorage.removeItem(RT); sessionStorage.removeItem(RT); (remember ? localStorage : sessionStorage).setItem(RT, rt); } catch (e) { /* private window: signs in each visit */ }
+}
+function forget() { try { localStorage.removeItem(RT); sessionStorage.removeItem(RT); } catch (e) { /* none */ } }
+
+async function token(grant, body) {
+  const r = await fetch(`${SB}/auth/v1/token?grant_type=${grant}`, {method: 'POST', headers: {apikey: KEY, 'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  if (!r.ok) { const e = new Error('auth'); e.status = r.status; throw e; }
+  return r.json();
+}
+async function get(name, at) {
+  const r = await fetch(`${SB}/storage/v1/object/authenticated/${BUCKET}/${name}`, {headers: {apikey: KEY, Authorization: 'Bearer ' + at}, cache: 'no-store'});
+  if (!r.ok) { const e = new Error('read'); e.status = r.status; throw e; }
+  return r;
+}
+async function gunzipText(buf) {
+  const b = new Uint8Array(buf);
+  if (b[0] !== 0x1f || b[1] !== 0x8b) return new TextDecoder().decode(b);     // already unpacked on the way
+  return new Response(new Blob([b]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+}
+
+// Writes the dashboard over this page: same address, its own code, the numbers handed in.
+async function open(session, remember) {
+  keep(session.refresh_token, remember);
+  const [app, doc] = await Promise.all([get('app.html', session.access_token).then(r => r.text()),
+    get('doc.json.gz', session.access_token).then(r => r.arrayBuffer()).then(gunzipText)]);
+  const at = JSON.stringify(session.access_token);
+  const inject = `<script>window.HAB_DATA=${doc.replace(/</g, '\\u003c')};window.HAB_SIGNOUT=function(){`
+    + `try{localStorage.removeItem('${RT}');sessionStorage.removeItem('${RT}')}catch(e){}`
+    + `fetch('${SB}/auth/v1/logout',{method:'POST',headers:{apikey:'${KEY}',Authorization:'Bearer '+${at}}}).finally(function(){location.reload()})};<\/script>`;
+  const marker = '<!--HAB_DATA-->';
+  if (!app.includes(marker)) throw Object.assign(new Error('page'), {status: 'page'});
+  document.open(); document.write(app.replace(marker, () => inject)); document.close();
+}
+
+function why(e) {
+  if (e.status === 'page') return 'The dashboard page in the store is not the expected one. The next hourly run replaces it.';
+  if (e.status === 400 || e.status === 403 || e.status === 404) return 'Signed in, but this account cannot open the numbers.';
+  return 'The server could not be reached. Try again in a minute.';
+}
+function showForm(msg, err) {
+  $('#wait').hidden = true; $('#f').hidden = false; $('#go').disabled = false;
+  $('#msg').textContent = msg || ''; $('#msg').classList.toggle('err', !!err);
+  if (!$('#email').value) $('#email').focus(); else $('#pw').focus();
+}
+
+$('#f').addEventListener('submit', async e => {
+  e.preventDefault(); $('#go').disabled = true; $('#msg').classList.remove('err'); $('#msg').textContent = 'Signing in…';
+  let s;
+  try { s = await token('password', {email: $('#email').value.trim(), password: $('#pw').value}); }
+  catch (err) { return showForm(err.status === 400 ? 'That email and password did not sign in.' : 'The server could not be reached. Try again in a minute.', true); }
+  $('#msg').textContent = 'Opening the numbers…';
+  try { await open(s, $('#remember').checked); } catch (err) { showForm(why(err), true); }
+});
+
+(async () => {
+  const rt = stored();
+  if (!rt) return showForm();
+  let s;
+  try { s = await token('refresh_token', {refresh_token: rt}); }
+  catch (e) { forget(); return showForm(e.status === 400 ? 'Signed out. Sign in again.' : 'The server could not be reached. Try again in a minute.', e.status !== 400); }
+  let remember = false; try { remember = !!localStorage.getItem(RT); } catch (e) { /* none */ }
+  try { await open(s, remember); } catch (e) { showForm(why(e), true); }
+})();
+})();
+</script>
+</body>
+</html>
